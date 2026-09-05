@@ -50,12 +50,18 @@ export const PresetSelector: React.FC<PresetSelectorProps> = ({
 
   const optRef = useRef<HTMLDivElement>(null);
   const formatRef = useRef<HTMLDivElement>(null);
+  const trackRef = useRef<HTMLDivElement>(null);
+  const sliderAreaRef = useRef<HTMLDivElement>(null);
   const optTimeoutRef = useRef<any>(null);
   const formatTimeoutRef = useRef<any>(null);
+  const isDraggingRef = useRef(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const lastWheelTimeRef = useRef(0);
 
   // Close popovers on click outside
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
+      if (isDraggingRef.current) return;
       if (optRef.current && !optRef.current.contains(e.target as Node)) {
         setOptOpen(false);
       }
@@ -84,6 +90,48 @@ export const PresetSelector: React.FC<PresetSelectorProps> = ({
     settings.presetId === 'fast' ||
     settings.presetId === 'high_quality' ||
     (settings.presetId === 'custom' && settings.videoBitrateKbps >= 7000);
+
+  // Wheel scrolling listener to adjust slider smoothly by scrolling
+  useEffect(() => {
+    const handleWheelEvent = (e: WheelEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const now = Date.now();
+      // 140ms cooldown between steps so scrolling feels crisp and doesn't skip
+      if (now - lastWheelTimeRef.current < 140) return;
+
+      const delta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : -e.deltaX;
+      if (Math.abs(delta) < 3) return;
+
+      const currIdx = getSliderIndex();
+      let nextIdx = currIdx;
+
+      // Wheel UP / RIGHT -> increase quality towards Calidad (step + 1)
+      // Wheel DOWN / LEFT -> decrease quality towards Velocidad (step - 1)
+      if (delta < 0) {
+        nextIdx = Math.min(3, currIdx + 1);
+      } else if (delta > 0) {
+        nextIdx = Math.max(0, currIdx - 1);
+      }
+
+      if (nextIdx !== currIdx) {
+        lastWheelTimeRef.current = now;
+        handleSelectStep(nextIdx);
+      }
+    };
+
+    const el = sliderAreaRef.current;
+    if (el) {
+      el.addEventListener('wheel', handleWheelEvent, { passive: false });
+    }
+
+    return () => {
+      if (el) {
+        el.removeEventListener('wheel', handleWheelEvent);
+      }
+    };
+  }, [currentSliderIndex, settings.format, optOpen]);
 
   // Label to display on the trigger button and in the slider header
   const getQualityLabel = (): string => {
@@ -158,14 +206,53 @@ export const PresetSelector: React.FC<PresetSelectorProps> = ({
     setFormatOpen(false);
   };
 
+  const updateSliderFromClientX = (clientX: number) => {
+    if (!trackRef.current) return;
+    const rect = trackRef.current.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const newIndex = Math.round(ratio * 3);
+    handleSelectStep(newIndex);
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {}
+    isDraggingRef.current = true;
+    setIsDragging(true);
+    updateSliderFromClientX(e.clientX);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDraggingRef.current) return;
+    e.preventDefault();
+    e.stopPropagation();
+    updateSliderFromClientX(e.clientX);
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (isDraggingRef.current) {
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {}
+      isDraggingRef.current = false;
+      setIsDragging(false);
+    }
+  };
+
   // Hover handlers with slight grace period to allow smooth cursor transition
   const handleOptMouseEnter = () => {
     clearTimeout(optTimeoutRef.current);
     setOptOpen(true);
   };
   const handleOptMouseLeave = () => {
+    if (isDraggingRef.current) return;
     optTimeoutRef.current = setTimeout(() => {
-      setOptOpen(false);
+      if (!isDraggingRef.current) {
+        setOptOpen(false);
+      }
     }, 150);
   };
 
@@ -216,13 +303,21 @@ export const PresetSelector: React.FC<PresetSelectorProps> = ({
           {optOpen && (
             <div
               className="absolute left-0 top-full pt-1.5 z-40 animate-in fade-in zoom-in-95 duration-150"
-              style={{ width: '310px' }}
+              style={{ width: '320px' }}
             >
-              <div className="bg-zinc-900 border border-zinc-800/90 rounded-2xl p-4 shadow-2xl backdrop-blur-md">
+              <div
+                ref={sliderAreaRef}
+                className="bg-zinc-900 border border-zinc-800/90 rounded-2xl p-4 shadow-2xl backdrop-blur-md select-none"
+              >
                 {/* Header with current level label matching user screenshot: "Alta >" */}
                 <div className="text-center mb-3">
-                  <div className="text-sm font-medium text-white inline-flex items-center gap-1">
-                    <span>{isMainPreset ? SLIDER_LEVELS[currentSliderIndex].label : activeLabel}</span>
+                  <div className="text-sm font-medium text-white inline-flex items-center gap-1.5">
+                    <span
+                      key={isMainPreset ? SLIDER_LEVELS[currentSliderIndex].label : activeLabel}
+                      className="font-semibold text-white transition-all duration-200"
+                    >
+                      {isMainPreset ? SLIDER_LEVELS[currentSliderIndex].label : activeLabel}
+                    </span>
                     <ChevronRight className="w-3.5 h-3.5 text-zinc-400" />
                   </div>
                   <p className="text-[11px] text-zinc-400 mt-0.5">
@@ -232,21 +327,37 @@ export const PresetSelector: React.FC<PresetSelectorProps> = ({
                   </p>
                 </div>
 
-                {/* Slider bar matching image.png (pill track, blue fill, white round thumb, discrete dots) */}
-                <div className="px-2 py-2 mb-4">
+                {/* Balance labels above track: Velocidad (izquierda) y Calidad (derecha) */}
+                <div className="flex items-center justify-between text-[11px] mb-2 px-1 select-none">
+                  <div className="flex items-center gap-1 text-amber-400 font-medium">
+                    <Zap className="w-3.5 h-3.5" />
+                    <span>Velocidad</span>
+                    <span className="text-[10px] text-zinc-500 font-normal">(- peso)</span>
+                  </div>
+                  <div className="flex items-center gap-1 text-blue-400 font-medium">
+                    <span className="text-[10px] text-zinc-500 font-normal">(+ nitidez)</span>
+                    <span>Calidad</span>
+                    <Sparkles className="w-3.5 h-3.5" />
+                  </div>
+                </div>
+
+                {/* Slider bar matching image.png with instant pointer press, drag, and wheel scroll */}
+                <div className="px-1 py-1 mb-2">
                   <div
-                    className="relative w-full h-3 rounded-full bg-zinc-800 cursor-pointer flex items-center select-none"
-                    onClick={(e) => {
-                      const rect = e.currentTarget.getBoundingClientRect();
-                      const clickX = e.clientX - rect.left;
-                      const ratio = Math.max(0, Math.min(1, clickX / rect.width));
-                      const clickedIndex = Math.round(ratio * 3);
-                      handleSelectStep(clickedIndex);
-                    }}
+                    ref={trackRef}
+                    onPointerDown={handlePointerDown}
+                    onPointerMove={handlePointerMove}
+                    onPointerUp={handlePointerUp}
+                    onPointerCancel={handlePointerUp}
+                    className="relative w-full h-3.5 rounded-full bg-zinc-800/90 shadow-inner cursor-grab active:cursor-grabbing flex items-center select-none touch-none"
                   >
-                    {/* Blue active fill track */}
+                    {/* Blue active fill track with smooth transition between steps */}
                     <div
-                      className="absolute left-0 top-0 h-full rounded-full bg-blue-600 transition-all duration-150 pointer-events-none"
+                      className={`absolute left-0 top-0 h-full rounded-full bg-blue-600 pointer-events-none ${
+                        isDragging
+                          ? 'transition-[width] duration-75 ease-out'
+                          : 'transition-[width] duration-300 ease-[cubic-bezier(0.25,1,0.5,1)]'
+                      }`}
                       style={{
                         width: `${(currentSliderIndex / 3) * 100}%`,
                       }}
@@ -256,42 +367,60 @@ export const PresetSelector: React.FC<PresetSelectorProps> = ({
                     {[0, 1, 2, 3].map((step) => {
                       const percent = (step / 3) * 100;
                       const isActive = step <= currentSliderIndex;
+                      const isCurrent = step === currentSliderIndex;
                       return (
                         <div
                           key={step}
-                          className={`absolute w-1.5 h-1.5 rounded-full -ml-[3px] pointer-events-none transition-colors ${
-                            isActive ? 'bg-blue-200' : 'bg-zinc-500/70'
+                          className={`absolute rounded-full pointer-events-none transition-all duration-300 ease-out ${
+                            isCurrent
+                              ? 'w-2 h-2 -ml-[4px] bg-white ring-2 ring-blue-400/40 shadow-sm'
+                              : isActive
+                              ? 'w-1.5 h-1.5 -ml-[3px] bg-blue-200'
+                              : 'w-1.5 h-1.5 -ml-[3px] bg-zinc-600'
                           }`}
                           style={{ left: `${percent}%` }}
                         />
                       );
                     })}
 
-                    {/* Circular white thumb */}
+                    {/* Circular white thumb with smooth glide transition */}
                     <div
-                      className="absolute w-5 h-5 rounded-full bg-white shadow-md border border-zinc-300/40 -ml-2.5 transition-all duration-150 flex items-center justify-center pointer-events-none"
+                      className={`absolute w-5 h-5 rounded-full bg-white shadow-lg border border-zinc-200 -ml-2.5 flex items-center justify-center pointer-events-none ${
+                        isDragging
+                          ? 'scale-110 shadow-blue-500/40 ring-2 ring-blue-400 transition-transform duration-75'
+                          : 'transition-[left,transform] duration-300 ease-[cubic-bezier(0.25,1,0.5,1)]'
+                      }`}
                       style={{
                         left: `${(currentSliderIndex / 3) * 100}%`,
                       }}
-                    />
+                    >
+                      <div className="w-1.5 h-1.5 rounded-full bg-blue-600 transition-colors duration-200" />
+                    </div>
                   </div>
 
                   {/* Step labels under slider */}
-                  <div className="flex justify-between text-[10px] text-zinc-500 mt-2 px-0.5">
+                  <div className="flex justify-between text-[10px] text-zinc-500 mt-2 px-0.5 select-none">
                     {SLIDER_LEVELS.map((lvl, idx) => (
                       <button
                         key={lvl.id}
                         type="button"
                         onClick={() => handleSelectStep(idx)}
-                        className={`transition-colors hover:text-zinc-300 ${
+                        className={`transition-all duration-200 hover:text-zinc-200 cursor-pointer ${
                           currentSliderIndex === idx && isMainPreset
-                            ? 'text-blue-400 font-semibold'
+                            ? 'text-blue-400 font-semibold scale-105'
                             : ''
                         }`}
                       >
                         {lvl.label}
                       </button>
                     ))}
+                  </div>
+
+                  {/* Visual micro-hint for scroll support */}
+                  <div className="text-center mt-2">
+                    <span className="text-[10px] text-zinc-500/80">
+                      Arrastra o usa la rueda del ratón (scroll)
+                    </span>
                   </div>
                 </div>
 
