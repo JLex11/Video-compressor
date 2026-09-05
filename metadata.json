@@ -1,0 +1,6 @@
+{
+  "name": "Optimizador de Video Rápido",
+  "description": "Compresión y optimización ultra rápida de videos por lotes sin pérdida de calidad y exportación multiformato.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
